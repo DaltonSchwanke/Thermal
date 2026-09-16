@@ -1,0 +1,60 @@
+name: Build Windows app
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check release version
+        shell: pwsh
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") {
+            throw 'The release tag must match VERSION.'
+          }
+      - name: Build portable app and installer
+        shell: powershell
+        run: .\scripts\build-installer.ps1
+      - name: Test app logic and desktop interactions
+        shell: powershell
+        run: |
+          $app = Join-Path $pwd 'dist\release\Thermal\Thermal.exe'
+          foreach ($mode in @('self-test', 'render-test')) {
+            $process = Start-Process $app -ArgumentList "--$mode" -PassThru
+            if (!$process.WaitForExit(60000)) { throw "$mode timed out" }
+            $report = Get-Content (Join-Path (Split-Path $app) "$mode.txt") -Raw
+            if ($process.ExitCode -ne 0 -or !$report.StartsWith('PASS:')) { throw $report }
+            Write-Host $report
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Thermal-windows-x64
+          if-no-files-found: error
+          path: |
+            dist/Thermal-Setup-*.exe
+            dist/Thermal-windows-x64.zip
+            dist/SHA256SUMS.txt
+
+  draft-release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: Thermal-windows-x64
+          path: release-assets
+      - name: Prepare a draft for review
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" release-assets/* --verify-tag --draft --title "Thermal $GITHUB_REF_NAME" --notes-file .github/RELEASE_NOTES.md
